@@ -7,7 +7,13 @@ from email.utils import parseaddr
 from fastapi import FastAPI, UploadFile, File
 from urllib.parse import urlparse
 import difflib
+import pickle
 app = FastAPI()
+with open("models/phishing_model.pkl", "rb") as f:
+    ml_model = pickle.load(f)
+
+with open("models/vectorizer.pkl", "rb") as f:
+    ml_vectorizer = pickle.load(f)
 
 def check_rules(parsed_email: dict):
     """
@@ -128,6 +134,23 @@ def check_urls(urls: list):
         "reasons": reasons,
         "url_details": url_details,
     }
+def predict_phishing(body_text: str):
+    """
+    Uses the trained ML model to predict phishing probability
+    based on the email body text.
+    """
+    text_vector = ml_vectorizer.transform([body_text])
+    prediction = ml_model.predict(text_vector)[0]
+    probabilities = ml_model.predict_proba(text_vector)[0]
+
+    # Get confidence for the predicted class
+    class_index = list(ml_model.classes_).index(prediction)
+    confidence = probabilities[class_index]
+
+    return {
+        "ml_prediction": prediction,
+        "ml_confidence": round(float(confidence), 2),
+    }
 # Allow frontend (React on localhost:5173) to call this backend
 app.add_middleware(
     CORSMiddleware,
@@ -180,12 +203,16 @@ def analyze_text(input_data: EmailTextInput):
     parsed = parse_email_text(input_data.raw_text)
     rule_result = check_rules(parsed)
     url_result = check_urls(parsed.get("urls", []))
+    ml_result = predict_phishing(parsed.get("body", ""))
     return {
         "status": "parsed",
         "parsed_email": parsed,
         "rule_analysis": rule_result,
         "url_analysis": url_result,
+        "ml_analysis": ml_result,
     }
+
+
 @app.post("/analyze/eml")
 async def analyze_eml(file: UploadFile = File(...)):
     contents = await file.read()
@@ -193,10 +220,12 @@ async def analyze_eml(file: UploadFile = File(...)):
     parsed = parse_email_text(raw_text)
     rule_result = check_rules(parsed)
     url_result = check_urls(parsed.get("urls", []))
+    ml_result = predict_phishing(parsed.get("body", ""))
     return {
         "status": "parsed",
         "filename": file.filename,
         "parsed_email": parsed,
         "rule_analysis": rule_result,
         "url_analysis": url_result,
+        "ml_analysis": ml_result,
     }
