@@ -9,8 +9,6 @@ df = pd.read_csv("data/phishing_email.csv")
 
 df = df.dropna(subset=["text_combined", "label"])
 
-df = df.sample(n=8000, random_state=42)
-
 X = df["text_combined"]
 y = df["label"].map({
     1: "phishing",
