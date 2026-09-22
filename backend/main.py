@@ -194,7 +194,52 @@ def parse_email_text(raw_text: str):
         "body": body.strip(),
         "urls": urls,
     }
+def combine_risk_score(rule_result: dict, url_result: dict, ml_result: dict):
+    """
+    Combines rule-based score, URL score, and ML prediction into a
+    single explainable risk score and level.
+    """
+    rule_score = rule_result.get("rule_score", 0)
+    url_score = url_result.get("url_score", 0)
 
+    ml_prediction = ml_result.get("ml_prediction", "legitimate")
+    ml_confidence = ml_result.get("ml_confidence", 0)
+
+    # Convert ML result into a 0-100 contribution
+    if ml_prediction == "phishing":
+        ml_score = ml_confidence * 100
+    else:
+        ml_score = (1 - ml_confidence) * 100
+
+    # Weighted combination: rules 35%, URL 25%, ML 40%
+    final_score = (rule_score * 0.35) + (url_score * 0.25) + (ml_score * 0.40)
+    final_score = round(min(final_score, 100), 1)
+
+    if final_score >= 60:
+        risk_level = "High"
+    elif final_score >= 30:
+        risk_level = "Medium"
+    else:
+        risk_level = "Low"
+
+    # Combine all reasons from rules and URL analysis
+    all_reasons = rule_result.get("reasons", []) + url_result.get("reasons", [])
+
+    # Add an ML-based reason too, for transparency
+    if ml_prediction == "phishing":
+        all_reasons.append(
+            f"ML model classified this as phishing with {round(ml_confidence * 100)}% confidence"
+        )
+    else:
+        all_reasons.append(
+            f"ML model classified this as legitimate with {round(ml_confidence * 100)}% confidence"
+        )
+
+    return {
+        "risk_score": final_score,
+        "risk_level": risk_level,
+        "reasons": all_reasons,
+    }
 @app.get("/")
 def root():
     return {"message": "PhishGuard backend running"}
@@ -204,12 +249,15 @@ def analyze_text(input_data: EmailTextInput):
     rule_result = check_rules(parsed)
     url_result = check_urls(parsed.get("urls", []))
     ml_result = predict_phishing(parsed.get("body", ""))
+    risk_result = combine_risk_score(rule_result, url_result, ml_result)
+
     return {
         "status": "parsed",
         "parsed_email": parsed,
         "rule_analysis": rule_result,
         "url_analysis": url_result,
         "ml_analysis": ml_result,
+        "risk_analysis": risk_result,
     }
 
 
@@ -221,6 +269,8 @@ async def analyze_eml(file: UploadFile = File(...)):
     rule_result = check_rules(parsed)
     url_result = check_urls(parsed.get("urls", []))
     ml_result = predict_phishing(parsed.get("body", ""))
+    risk_result = combine_risk_score(rule_result, url_result, ml_result)
+
     return {
         "status": "parsed",
         "filename": file.filename,
@@ -228,4 +278,5 @@ async def analyze_eml(file: UploadFile = File(...)):
         "rule_analysis": rule_result,
         "url_analysis": url_result,
         "ml_analysis": ml_result,
+        "risk_analysis": risk_result,
     }
