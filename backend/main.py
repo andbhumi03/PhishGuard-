@@ -4,7 +4,7 @@ from pydantic import BaseModel
 import re
 from email import message_from_string
 from email.utils import parseaddr
-
+from fastapi import FastAPI, UploadFile, File
 app = FastAPI()
 
 # Allow frontend (React on localhost:5173) to call this backend
@@ -59,5 +59,15 @@ def analyze_text(input_data: EmailTextInput):
     parsed = parse_email_text(input_data.raw_text)
     return {
         "status": "parsed",
+        "parsed_email": parsed,
+    }
+@app.post("/analyze/eml")
+async def analyze_eml(file: UploadFile = File(...)):
+    contents = await file.read()
+    raw_text = contents.decode(errors="ignore")
+    parsed = parse_email_text(raw_text)
+    return {
+        "status": "parsed",
+        "filename": file.filename,
         "parsed_email": parsed,
     }
