@@ -8,6 +8,7 @@ from fastapi import FastAPI, UploadFile, File
 from urllib.parse import urlparse
 import difflib
 import pickle
+from database import SessionLocal, Analysis, URLRecord, ReasonRecord
 app = FastAPI()
 with open("models/phishing_model.pkl", "rb") as f:
     ml_model = pickle.load(f)
@@ -240,9 +241,61 @@ def combine_risk_score(rule_result: dict, url_result: dict, ml_result: dict):
         "risk_level": risk_level,
         "reasons": all_reasons,
     }
+def save_analysis(source_type, parsed, risk_result, ml_result, url_result):
+    db = SessionLocal()
+    try:
+        analysis = Analysis(
+            source_type=source_type,
+            sender_name=parsed.get("sender_name", ""),
+            sender_email=parsed.get("sender_email", ""),
+            subject=parsed.get("subject", ""),
+            body=parsed.get("body", ""),
+            risk_score=risk_result.get("risk_score", 0),
+            risk_level=risk_result.get("risk_level", ""),
+            ml_prediction=ml_result.get("ml_prediction", ""),
+            ml_confidence=ml_result.get("ml_confidence", 0),
+        )
+        db.add(analysis)
+        db.commit()
+        db.refresh(analysis)
+
+        for url_item in url_result.get("url_details", []):
+            db.add(URLRecord(
+                analysis_id=analysis.id,
+                url=url_item.get("url", ""),
+                domain=url_item.get("domain", ""),
+                uses_https=str(url_item.get("uses_https", False)),
+                is_suspicious=str(url_item.get("is_suspicious", False)),
+            ))
+
+        for reason in risk_result.get("reasons", []):
+            db.add(ReasonRecord(analysis_id=analysis.id, message=reason))
+
+        db.commit()
+        return analysis.id
+    finally:
+        db.close()
 @app.get("/")
 def root():
     return {"message": "PhishGuard backend running"}
+@app.get("/analyses")
+def list_analyses():
+    db = SessionLocal()
+    try:
+        results = db.query(Analysis).order_by(Analysis.created_at.desc()).all()
+        return [
+            {
+                "id": a.id,
+                "sender_email": a.sender_email,
+                "subject": a.subject,
+                "risk_score": a.risk_score,
+                "risk_level": a.risk_level,
+                "created_at": a.created_at.isoformat(),
+            }
+            for a in results
+        ]
+    finally:
+        db.close()
 @app.post("/analyze/text")
 def analyze_text(input_data: EmailTextInput):
     parsed = parse_email_text(input_data.raw_text)
@@ -251,8 +304,11 @@ def analyze_text(input_data: EmailTextInput):
     ml_result = predict_phishing(parsed.get("body", ""))
     risk_result = combine_risk_score(rule_result, url_result, ml_result)
 
+    analysis_id = save_analysis("paste", parsed, risk_result, ml_result, url_result)
+
     return {
         "status": "parsed",
+        "analysis_id": analysis_id,
         "parsed_email": parsed,
         "rule_analysis": rule_result,
         "url_analysis": url_result,
@@ -271,9 +327,12 @@ async def analyze_eml(file: UploadFile = File(...)):
     ml_result = predict_phishing(parsed.get("body", ""))
     risk_result = combine_risk_score(rule_result, url_result, ml_result)
 
+    analysis_id = save_analysis("eml", parsed, risk_result, ml_result, url_result)
+
     return {
         "status": "parsed",
         "filename": file.filename,
+        "analysis_id": analysis_id,
         "parsed_email": parsed,
         "rule_analysis": rule_result,
         "url_analysis": url_result,
