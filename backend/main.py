@@ -79,11 +79,7 @@ def check_rules(parsed_email: dict):
         "rule_score": min(score, 100),
         "reasons": reasons,
     }
-def check_urls(urls: list):
-    """
-    Analyzes extracted URLs for suspicious patterns.
-    Returns a score and list of reasons based on URL red flags.
-    """
+def check_urls(urls: list, sender_domain: str = ""):
     score = 0
     reasons = []
     url_details = []
@@ -96,28 +92,32 @@ def check_urls(urls: list):
         is_suspicious = False
         reason = None
 
-        # 1. Not using HTTPS
-        if parsed.scheme != "https":
+        # Skip harsh flagging if the URL's domain matches the sender's own domain
+        # (e.g. an email from devpost.com linking to devpost.com is normal)
+        is_internal_link = sender_domain and sender_domain in domain
+
+        # 1. Not using HTTPS — only flag strongly if NOT an internal link
+        if parsed.scheme != "https" and not is_internal_link:
             score += 15
             reason = "URL does not use HTTPS"
             is_suspicious = True
             reasons.append(f"Insecure link (no HTTPS): {url}")
+        elif parsed.scheme != "https" and is_internal_link:
+            score += 3  # minor point, not a big red flag for internal links
+            reasons.append(f"Note: internal link uses HTTP not HTTPS: {url}")
 
-        # 2. Lookalike domain check (close match to a known brand but not exact)
+        # 2 & 3. Lookalike/brand checks stay the same (still important even for internal links)
         for brand in known_brands:
             similarity = difflib.SequenceMatcher(None, brand, domain.replace(".com", "").split(".")[0]).ratio()
             if brand not in domain and similarity > 0.7:
                 score += 30
-                reason = f"Domain looks similar to '{brand}' but isn't (possible typosquatting)"
                 is_suspicious = True
                 reasons.append(f"Suspicious lookalike domain: {domain} (mimics '{brand}')")
                 break
 
-        # 3. Brand name in domain but with extra suspicious words
         for brand in known_brands:
             if brand in domain and domain != f"{brand}.com" and domain != f"www.{brand}.com":
                 score += 20
-                reason = f"Domain contains '{brand}' but isn't the official domain"
                 is_suspicious = True
                 reasons.append(f"Domain mimics '{brand}' with extra text: {domain}")
                 break
@@ -155,7 +155,9 @@ def predict_phishing(body_text: str):
 # Allow frontend (React on localhost:5173) to call this backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -171,6 +173,29 @@ def parse_email_text(raw_text: str):
     Parses raw email text (can be plain pasted text or a real raw email
     with headers). Falls back gracefully if headers aren't present.
     """
+    gmail_match = re.search(
+        r"^\s*###\s*(.*?)\s*<([^<>\s@]+@[^<>\s]+)>\s*$",
+        raw_text,
+        re.MULTILINE,
+    )
+    if gmail_match:
+        sender_name = gmail_match.group(1).strip()
+        sender_email = gmail_match.group(2).strip()
+        copied_text = raw_text[:gmail_match.start()] + raw_text[gmail_match.end():]
+        subject_match = re.search(r"^\s*Subject:\s*(.+?)\s*$", copied_text, re.MULTILINE | re.IGNORECASE)
+        subject = subject_match.group(1).strip() if subject_match else ""
+        if subject_match:
+            copied_text = copied_text[:subject_match.start()] + copied_text[subject_match.end():]
+        body = copied_text.strip()
+        return {
+            "sender_name": sender_name,
+            "sender_email": sender_email,
+            "reply_to": "",
+            "subject": subject,
+            "body": body,
+            "urls": [url.rstrip(").,;]") for url in extract_urls(body)],
+        }
+
     msg = message_from_string(raw_text)
     from_header = msg.get("From", "")
     reply_to = msg.get("Reply-To", "")
@@ -300,12 +325,11 @@ def list_analyses():
 def analyze_text(input_data: EmailTextInput):
     parsed = parse_email_text(input_data.raw_text)
     rule_result = check_rules(parsed)
-    url_result = check_urls(parsed.get("urls", []))
+    sender_domain = parsed.get("sender_email", "").split("@")[-1] if "@" in parsed.get("sender_email", "") else ""
+    url_result = check_urls(parsed.get("urls", []), sender_domain)
     ml_result = predict_phishing(parsed.get("body", ""))
     risk_result = combine_risk_score(rule_result, url_result, ml_result)
-
     analysis_id = save_analysis("paste", parsed, risk_result, ml_result, url_result)
-
     return {
         "status": "parsed",
         "analysis_id": analysis_id,
